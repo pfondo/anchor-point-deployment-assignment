@@ -43,20 +43,24 @@ DEFAULT_TIME_DEPLOYMENT = 1  # In seconds
 DEFAULT_TIME_REMOVAL = 0.1  # In seconds
 DEFAULT_COST_RELOCATION = 1  # Adimensional (NOTE: Could also be in bytes)
 
-DEFAULT_ALPHA1 = 0.7
-DEFAULT_ALPHA2 = 0.1
-DEFAULT_ALPHA3 = 0.1
-DEFAULT_ALPHA4 = 0.1
+DEFAULT_ALPHA1 = 0.5
+DEFAULT_ALPHA2 = 0.25
+DEFAULT_ALPHA3 = 0.25
 
 
 class UE:
-    def __init__(self, id, x=0, y=0, bs=None):
+    def __init__(self, id, x=0, y=0, bs=None, pred_x=0, pred_y=0, pred_bs=None):
         self._id = id
         self._x = float(x)
         self._y = float(y)
         self._bs = bs
+        self._pred_bs = pred_bs
+        self._pred_x = pred_x
+        self._pred_y = pred_y
         if self._bs is not None:
             self._bs.add_UE(self)
+        if self._pred_bs is not None:
+            self._pred_bs.add_pred_UE(self)
 
     def get_x(self):
         return self._x
@@ -80,6 +84,22 @@ class UE:
             bs.add_UE(self)
         self._bs = bs
 
+    def get_pred_coords(self):
+        return [self._pred_x, self._pred_y]
+
+    def set_pred_coords(self, pred_x, pred_y):
+        self._pred_x, self._pred_y = (float(pred_x), float(pred_y))
+
+    def get_pred_bs(self):
+        return self._pred_bs
+
+    def set_pred_bs(self, pred_bs):
+        if self._pred_bs is not None:
+            self._pred_bs.remove_pred_UE(self)
+        if pred_bs is not None:
+            pred_bs.add_pred_UE(self)
+        self._pred_bs = pred_bs
+
     def get_id(self):
         return self._id
 
@@ -88,6 +108,13 @@ class UE:
             return float("inf")
         else:
             distance = self._bs.get_distance_coords(self._x, self._y)
+            return compute_path_loss(distance)
+
+    def get_pred_pl(self):
+        if self._bs is None:
+            return float("inf")
+        else:
+            distance = self._bs.get_distance_coords(self._pred_x, self._pred_y)
             return compute_path_loss(distance)
 
     def update_bs(self, bs, pl=float("inf")):
@@ -102,6 +129,18 @@ class UE:
         self.set_coords(x, y)
         self.set_bs(bs)
 
+    def update_pred_bs(self, pred_bs, pl=float("inf")):
+        if pred_bs is None or pl + PL_THRESHOLD < self.get_pred_pl():
+            self.set_pred_bs(pred_bs)
+
+    def update_pred(self, pred_x, pred_y, pred_bs, pl=float("inf")):
+        self.set_pred_coords(pred_x, pred_y)
+        self.update_pred_bs(pred_bs, pl)
+
+    def update_pred_unconditional(self, pred_x, pred_y, pred_bs):
+        self.set_pred_coords(pred_x, pred_y)
+        self.set_pred_bs(pred_bs)
+
 
 class BS:
     def __init__(self, id_, x, y, UPF=False):
@@ -110,6 +149,7 @@ class BS:
         self._y = float(y)
         self._UPF = UPF
         self.UEs = []
+        self.pred_UEs = []
 
     def get_id(self):
         return self._id
@@ -137,6 +177,21 @@ class BS:
 
     def clear_UEs(self):
         self.UEs = []
+
+    def add_pred_UE(self, ue):
+        self.pred_UEs.append(ue)
+
+    def remove_pred_UE(self, ue):
+        self.pred_UEs.remove(ue)
+
+    def get_pred_UEs(self):
+        return self.pred_UEs
+
+    def get_pred_numUEs(self):
+        return len(self.pred_UEs)
+
+    def clear_pred_UEs(self):
+        self.pred_UEs = []
 
     def get_distance(self, bs2):
         return ((bs2.get_x()-self.get_x())**2 + (bs2.get_y()-self.get_y())**2)**0.5
@@ -254,9 +309,30 @@ def read_UE_data(ue_file, BSs, iteration_duration):
             pl = None
             if len(line) > 5:
                 bs = BSs[int(line[5])]
+                # This line needs to be uncommented in order to have histeresis
+                #pl = compute_path_loss(bs.get_distance_coords(x, y))
             else:
                 bs, distance = get_optimal_bs(BSs, x, y)
                 pl = compute_path_loss(distance)
+
+            pred_x = None
+            pred_y = None
+
+            if len(line) > 7:
+                pred_x = float(line[6])
+                pred_y = float(line[7])
+                # pred_x = float(line[2])
+                # pred_y = float(line[3])
+
+            pred_pl = None
+            if len(line) > 8:
+                pred_bs = BSs[int(line[8])]
+                # This line needs to be uncommented in order to have histeresis
+                #pred_pl = compute_path_loss(pred_bs.get_distance_coords(pred_x, pred_y))
+
+            else:
+                pred_bs, pred_distance = get_optimal_bs(BSs, pred_x, pred_y)
+                pred_pl = compute_path_loss(pred_distance)
 
             if first_timestamp_iteration == None:
                 first_timestamp_iteration = timestamp
@@ -265,6 +341,7 @@ def read_UE_data(ue_file, BSs, iteration_duration):
                 # Iteration finished: Yield results
                 for ue in [ue for id_, ue in UEs_last_iteration.items() if id_ not in UEs_new_iteration.keys()]:
                     ue.update_bs(None)
+                    ue.update_pred_bs(None)
 
                 UEs_last_iteration = UEs_new_iteration
                 yield UEs_new_iteration
@@ -280,6 +357,11 @@ def read_UE_data(ue_file, BSs, iteration_duration):
                     ue.update(x, y, bs, pl)
                 else:
                     ue.update_unconditional(x, y, bs)
+                if pred_pl:
+                    ue.update_pred(pred_x, pred_y, pred_bs, pred_pl)
+                    #ue.update_pred_unconditional(pred_x, pred_y, pred_bs)
+                else:
+                    ue.update_pred_unconditional(pred_x, pred_y, pred_bs)
             # Only the last appearance of each UE in the iteration is considered
             elif id_ in UEs_new_iteration:
                 ue = UEs_new_iteration[id_]
@@ -287,14 +369,18 @@ def read_UE_data(ue_file, BSs, iteration_duration):
                     ue.update(x, y, bs, pl)
                 else:
                     ue.update_unconditional(x, y, bs)
+                if pred_pl:
+                    ue.update_pred(pred_x, pred_y, pred_bs, pred_pl)
+                    #ue.update_pred_unconditional(pred_x, pred_y, pred_bs)
+                else:
+                    ue.update_pred_unconditional(pred_x, pred_y, pred_bs)
             # Se crea un nuevo UE
             else:
-                ue = UE(id_, x, y, bs)
+                ue = UE(id_, x, y, bs, pred_x, pred_y, pred_bs)
             UEs_new_iteration[id_] = ue
 
+
 # Deprecated: Used to generate synthetic data
-
-
 def generate_UE_data_random(BSs):
     UEs_last_iteration = {}
 
@@ -732,23 +818,34 @@ def UPF_assignment_random_bs(G: nx.Graph, num_UPFs, UE_to_UPF_assignment_previou
     return UE_to_UPF_assignment, BSs_with_UPF_ids
 
 
-def UPF_assignment_greedy_overhead(G: nx.Graph, BSs, num_UPFs, UE_to_UPF_assignment_previous, BSs_with_UPF_ids_previous, G_shortest_path_lengths, highest_bs_id, iteration_duration, time_deployment, time_removal, cost_relocation, alpha1, alpha2, alpha3, alpha4, num_UEs, max_num_hops):
-    #UE_to_UPF_assignment = {}
-    BS_to_UPF_assignment_previous = convert_ue_assignment_to_bs_assignment(
-        BSs, UE_to_UPF_assignment_previous)
-
+def UPF_assignment_greedy_overhead(G: nx.Graph, BSs, num_UPFs, UE_to_UPF_assignment_previous, BSs_with_UPF_ids_previous, G_shortest_path_lengths, highest_bs_id, iteration_duration, time_deployment, time_removal, cost_relocation, alpha1, alpha2, alpha3, num_UEs, max_num_hops):
     BS_to_UPF_assignment = {}
     BSs_with_UPF_ids = set()
 
     bs: BS
 
-    latencies_list = [
-        G.number_of_nodes() + 1 for _ in range(highest_bs_id + 1)]
-    num_ues_list = [0 for _ in range(highest_bs_id + 1)]
+    latencies_agg_dict = {}
+    ues_agg_dict = {}
     tot_ues = 0
     for bs in G.nodes:
-        num_ues_list[bs.get_id()] = bs.get_numUEs()
         tot_ues += bs.get_numUEs()
+
+        ue: UE
+        for ue in bs.get_UEs():
+            upf_node_previous = -1
+            if ue.get_id() in UE_to_UPF_assignment_previous:
+                upf_node_previous = UE_to_UPF_assignment_previous[ue.get_id()]
+            if bs.get_id() not in latencies_agg_dict:
+                latencies_agg_dict[bs.get_id()] = {}
+            if upf_node_previous not in latencies_agg_dict[bs.get_id()]:
+                latencies_agg_dict[bs.get_id(
+                )][upf_node_previous] = max_num_hops + 1
+            if bs.get_id() not in ues_agg_dict:
+                ues_agg_dict[bs.get_id()] = {}
+            if upf_node_previous not in ues_agg_dict[bs.get_id()]:
+                ues_agg_dict[bs.get_id()][upf_node_previous] = []
+
+            ues_agg_dict[bs.get_id()][upf_node_previous].append(ue.get_id())
 
     done_BSs = [False for _ in range(highest_bs_id + 1)]
 
@@ -759,557 +856,234 @@ def UPF_assignment_greedy_overhead(G: nx.Graph, BSs, num_UPFs, UE_to_UPF_assignm
             if not done_BSs[bs.get_id()]:
                 # Check objective function if bs is selected
 
-                # f2: Resource usage
-                f2_num_UPFs = len(BSs_with_UPF_ids) + 1
-
-                # f3: Deployment overhead
-                f3_deployment_overhead = get_deployment_overhead(
+                # f2: Deployment overhead
+                f2_deployment_overhead = get_deployment_overhead(
                     BSs_with_UPF_ids_previous, BSs_with_UPF_ids | set([bs.get_id()]), time_deployment, time_removal, iteration_duration)
 
-                # f1: Vehicle latency (90-th percentile)
+                # f1 + f2: Vehicle latency (90-th percentile) and control-plane reassignment overhead
                 f_objective_function = get_objective_function(
-                    G, 0, f2_num_UPFs, f3_deployment_overhead, 0, alpha1, alpha2, alpha3, alpha4, time_deployment, time_removal, cost_relocation, num_UEs, max_num_hops)
+                    G, 0, f2_deployment_overhead, 0, alpha1, alpha2, alpha3, time_deployment, time_removal, cost_relocation, num_UEs, max_num_hops)
                 for bs2 in G.nodes:
                     if bs2.get_numUEs() == 0:
                         continue
-                    new_latency = latencies_list[bs2.get_id()]
 
-                    # new_latency = min(
-                    #     G_shortest_path_lengths[bs2][bs], latencies_list[bs2.get_id()])
+                    for upf_node_previous in ues_agg_dict[bs2.get_id()]:
+                        num_UEs_agg = len(
+                            ues_agg_dict[bs2.get_id()][upf_node_previous])
+                        latency_agg = latencies_agg_dict[bs2.get_id(
+                        )][upf_node_previous]
+                        f3_control_plane_reassignment_overhead = 0
+                        if (upf_node_previous != -1 and bs2.get_id() in BS_to_UPF_assignment and upf_node_previous in BS_to_UPF_assignment[bs2.get_id()]):
+                            f3_control_plane_reassignment_overhead = num_UEs_agg * \
+                                G_shortest_path_lengths[BSs[upf_node_previous]][BSs[BS_to_UPF_assignment[bs2.get_id(
+                                )][upf_node_previous]]] * cost_relocation
 
-                    f_objective_keep = get_objective_function(G, num_ues_list[bs2.get_id()] * latencies_list[bs2.get_id(
-                    )] / tot_ues, 0, 0, 0, alpha1, alpha2, alpha3, alpha4, time_deployment, time_removal, cost_relocation, num_UEs, max_num_hops)
+                        f_objective_keep = get_objective_function(G, num_UEs_agg * latency_agg / tot_ues, 0, f3_control_plane_reassignment_overhead,
+                                                                  alpha1, alpha2, alpha3, time_deployment, time_removal, cost_relocation, num_UEs, max_num_hops)
 
-                    f4_control_plane_reassignment_overhead = 0
-                    if (bs2.get_id() in BS_to_UPF_assignment_previous):
-                        f4_control_plane_reassignment_overhead = num_ues_list[bs2.get_id(
-                        )] * G_shortest_path_lengths[BSs[BS_to_UPF_assignment_previous[bs2.get_id()]]][bs]
+                        f3_control_plane_reassignment_overhead = 0
+                        if (upf_node_previous != -1):
+                            f3_control_plane_reassignment_overhead = num_UEs_agg * \
+                                G_shortest_path_lengths[BSs[upf_node_previous]
+                                                        ][bs] * cost_relocation
 
-                    f_objective_relocate = get_objective_function(G, num_ues_list[bs2.get_id()] * G_shortest_path_lengths[bs2][bs] / tot_ues, 0, 0, f4_control_plane_reassignment_overhead *
-                                                                  cost_relocation, alpha1, alpha2, alpha3, alpha4, time_deployment, time_removal, cost_relocation, num_UEs, max_num_hops)
+                        f_objective_relocate = get_objective_function(
+                            G, num_UEs_agg * G_shortest_path_lengths[bs2][bs] / tot_ues, 0, f3_control_plane_reassignment_overhead, alpha1, alpha2, alpha3, time_deployment, time_removal, cost_relocation, num_UEs, max_num_hops)
 
-                    if f_objective_relocate < f_objective_keep:
-                        f_objective_function += f_objective_relocate
-                    else:
-                        f_objective_function += f_objective_keep
+                        if f_objective_relocate < f_objective_keep:
+                            f_objective_function += f_objective_relocate
+                        else:
+                            f_objective_function += f_objective_keep
 
                 if best_bs == None or f_objective_function < best_f_objective_function:
                     best_bs = bs
                     best_f_objective_function = f_objective_function
-
-        # NOTE: Experimental
-        # if previous_f_objective_function != None and best_f_objective_function > previous_f_objective_function:
-        #     # Do not add more UPFs if the best objective function increases
-        #     break
 
         previous_f_objective_function = best_f_objective_function
 
         upf_node = best_bs.get_id()
         done_BSs[upf_node] = True
         BSs_with_UPF_ids.add(upf_node)
-        # for ue in bs.get_UEs():
-        #    UE_to_UPF_assignment[ue.get_id()] = upf_node
 
         for bs2 in G.nodes:
             if bs2.get_numUEs() == 0:
                 continue
-            new_latency = latencies_list[bs2.get_id()]
 
-            f_objective_keep = get_objective_function(G, latencies_list[bs2.get_id(
-            )], 0, 0, 0, alpha1, alpha2, alpha3, alpha4, time_deployment, time_removal, cost_relocation, num_UEs, max_num_hops)
-            f_objective_relocate = get_objective_function(G, G_shortest_path_lengths[bs2][best_bs], 0, 0, G_shortest_path_lengths[bs2][
-                best_bs] * cost_relocation, alpha1, alpha2, alpha3, alpha4, time_deployment, time_removal, cost_relocation, num_UEs, max_num_hops)
+            for upf_node_previous in ues_agg_dict[bs2.get_id()]:
+                num_UEs_agg = len(
+                    ues_agg_dict[bs2.get_id()][upf_node_previous])
+                latency_agg = latencies_agg_dict[bs2.get_id(
+                )][upf_node_previous]
+                f3_control_plane_reassignment_overhead = 0
+                if (upf_node_previous != -1 and bs2.get_id() in BS_to_UPF_assignment and upf_node_previous in BS_to_UPF_assignment[bs2.get_id()]):
+                    f3_control_plane_reassignment_overhead = num_UEs_agg * \
+                        G_shortest_path_lengths[BSs[upf_node_previous]][BSs[BS_to_UPF_assignment[bs2.get_id(
+                        )][upf_node_previous]]] * cost_relocation
 
-            # if G_shortest_path_lengths[bs2][bs] < latencies_list[bs2.get_id()]:
-            if f_objective_relocate < f_objective_keep:
-                new_latency = G_shortest_path_lengths[bs2][best_bs]
-                latencies_list[bs2.get_id()] = new_latency
-                # Update the assignment of all the UEs in bs2
-                BS_to_UPF_assignment[bs2.get_id()] = upf_node
+                f_objective_keep = get_objective_function(G, num_UEs_agg * latency_agg / tot_ues, 0, f3_control_plane_reassignment_overhead,
+                                                            alpha1, alpha2, alpha3, time_deployment, time_removal, cost_relocation, num_UEs, max_num_hops)
 
-    # Convert back to original format BS_to_UPF_assignment -> UE_to_UPF_assignment
-    UE_to_UPF_assignment = convert_bs_assignment_to_ue_assignment(
-        BSs, BS_to_UPF_assignment)
+                f3_control_plane_reassignment_overhead = 0
+                if (upf_node_previous != -1):
+                    f3_control_plane_reassignment_overhead = num_UEs_agg * \
+                        G_shortest_path_lengths[BSs[upf_node_previous]
+                                                ][best_bs] * cost_relocation
 
-    return UE_to_UPF_assignment, BSs_with_UPF_ids
+                f_objective_relocate = get_objective_function(
+                    G, num_UEs_agg * G_shortest_path_lengths[bs2][best_bs] / tot_ues, 0, f3_control_plane_reassignment_overhead, alpha1, alpha2, alpha3, time_deployment, time_removal, cost_relocation, num_UEs, max_num_hops)
 
-
-# PABLO: Working on this!
-def UPF_assignment_simulated_annealing_previous(G: nx.Graph, BSs, num_UPFs, UE_to_UPF_assignment_previous, BSs_with_UPF_ids_previous, G_shortest_path_lengths, highest_bs_id, iteration_duration, time_deployment, time_removal, cost_relocation, alpha1, alpha2, alpha3, alpha4, num_UEs, max_num_hops):
-    BS_to_UPF_assignment_previous = convert_ue_assignment_to_bs_assignment(
-        BSs, UE_to_UPF_assignment_previous)
-
-    #print("\nRunning simulated annealing", file=stderr)
-
-    BSs_with_UPF_ids = copy.deepcopy(BSs_with_UPF_ids_previous)
-    BS_to_UPF_assignment = copy.deepcopy(BS_to_UPF_assignment_previous)
-
-    # If there was not UPFs in the previous interval, assign them using the greedy_overhead algorithm
-    if (BSs_with_UPF_ids == None or len(BSs_with_UPF_ids) == 0):
-        print("\nRunning simulated annealing previous", file=stderr)
-    # TODO: Do this only for the first iteration or never
-    UE_to_UPF_assignment, BSs_with_UPF_ids = UPF_assignment_greedy_overhead(G, BSs, num_UPFs, UE_to_UPF_assignment_previous, BSs_with_UPF_ids_previous, G_shortest_path_lengths,
-                                                                            highest_bs_id, iteration_duration, time_deployment, time_removal, cost_relocation, alpha1, alpha2, alpha3, alpha4, num_UEs, max_num_hops)
-    BS_to_UPF_assignment = convert_ue_assignment_to_bs_assignment(
-        BSs, UE_to_UPF_assignment)
-
-    # Assign users which where not present in the previous interval to the closest active BS
-    bs: BS
-    for bs in G.nodes():
-        if bs.get_numUEs() > 0 and bs.get_id() not in BS_to_UPF_assignment:
-            _, upf_node = get_minimum_hops_from_BS_to_any_UPF(
-                G, BSs, bs, BSs_with_UPF_ids, G_shortest_path_lengths)
-            BS_to_UPF_assignment[bs.get_id()] = upf_node.get_id()
-
-    #BSs_with_UPF_ids = set(BS_to_UPF_assignment.values())
-
-    latencies_list = [0 for _ in range(highest_bs_id + 1)]
-    num_ues_list = [0 for _ in range(highest_bs_id + 1)]
-    tot_ues = 0
-    tot_latencies = 0
-    for bs in G.nodes:
-        if bs.get_numUEs() > 0:
-            latencies_list[bs.get_id()] = G_shortest_path_lengths[BSs[bs.get_id()]
-                                                                  ][BSs[BS_to_UPF_assignment[bs.get_id()]]]
-            num_ues_list[bs.get_id()] = bs.get_numUEs()
-            tot_ues += bs.get_numUEs()
-            tot_latencies += bs.get_numUEs() * latencies_list[bs.get_id()]
-
-    # Counts the number of BSs assigned to a given UPF; Used for speedup calculations
-    count_BSs_per_UPF = [0 for _ in range(highest_bs_id + 1)]
-    for bs_id in BS_to_UPF_assignment.values():
-        count_BSs_per_UPF[bs_id] += 1
-
-    active_BSs = []
-    bs: BS
-    for bs in G.nodes():
-        if bs.get_numUEs() > 0:
-            active_BSs.append(bs.get_id())
-
-    f1_latency = tot_latencies/tot_ues
-    f2_num_upfs = len(BSs_with_UPF_ids)
-    f3_deployment_overhead = get_deployment_overhead(
-        BSs_with_UPF_ids_previous, BSs_with_UPF_ids, time_deployment, time_removal, iteration_duration)
-    f4_cp_reassignment_overhead_keep = get_control_plane_reassignment_overhead_bs(
-        BSs, BS_to_UPF_assignment_previous, BS_to_UPF_assignment, cost_relocation, G_shortest_path_lengths)
-    f_objective_keep = get_objective_function(G, f1_latency, f2_num_upfs, f3_deployment_overhead, f4_cp_reassignment_overhead_keep,
-                                              alpha1, alpha2, alpha3, alpha4, time_deployment, time_removal, cost_relocation,
-                                              num_UEs, max_num_hops)
-
-    number_of_iterations = 100000
-    for iteration in range(number_of_iterations):
-        # Generate new candidate solution by mutating current solution
-        # Pick random active BS
-        # Assign all the UEs in the BS to a random BS
-        #ue_bs_id_change = active_BSs[randint(0, len(active_BSs) - 1)]
-        ue_bs_id_change = choice(active_BSs)
-        upf_node_id_change = randint(0, G.number_of_nodes() - 1)
-
-        if upf_node_id_change == BS_to_UPF_assignment[ue_bs_id_change]:
-            continue
-
-        new_distance = G_shortest_path_lengths[BSs[ue_bs_id_change]
-                                               ][BSs[upf_node_id_change]]
-        f1_latency_new = f1_latency + \
-            ((new_distance - latencies_list[ue_bs_id_change])
-             * num_ues_list[ue_bs_id_change] / tot_ues)
-
-        f2_num_upfs_new = f2_num_upfs
-        BSs_with_UPF_added = set()
-        BSs_with_UPF_removed = set()
-        if upf_node_id_change not in BSs_with_UPF_ids:
-            f2_num_upfs_new += 1
-            BSs_with_UPF_added.add(upf_node_id_change)
-        if count_BSs_per_UPF[BS_to_UPF_assignment[ue_bs_id_change]] <= 1:
-            f2_num_upfs_new -= 1
-            BSs_with_UPF_removed.add(BS_to_UPF_assignment[ue_bs_id_change])
-
-        # Check that the resulting number of UPFs needed (f2_num_upfs_new) does not exceed
-        # the maximum number of UPFs allowed (num_UPFs)
-        if f2_num_upfs_new > num_UPFs:
-            continue
-
-        f3_deployment_overhead_new = f3_deployment_overhead + get_deployment_overhead(
-            BSs_with_UPF_removed, BSs_with_UPF_added, time_deployment, time_removal, iteration_duration)
-
-        f4_cp_reassignment_overhead_relocate = 0
-        if ue_bs_id_change in BS_to_UPF_assignment_previous:
-            f4_cp_reassignment_overhead_relocate = G_shortest_path_lengths[BSs[
-                BS_to_UPF_assignment_previous[ue_bs_id_change]]][BSs[upf_node_id_change]] * cost_relocation
-        f_objective_relocate = get_objective_function(G, f1_latency_new,
-                                                      f2_num_upfs_new, f3_deployment_overhead_new, f4_cp_reassignment_overhead_relocate,
-                                                      alpha1, alpha2, alpha3, alpha4, time_deployment, time_removal, cost_relocation,
-                                                      num_UEs, max_num_hops)
-
-        if f_objective_relocate <= f_objective_keep:
-            #print("{} {}".format(ue_bs_id_change, upf_node_id_change), file=stderr)
-            # if f_objective_function <= previous_f_objective_function:
-            # Accept new candidate if it does not degrade (increase) the objective function
-            count_BSs_per_UPF[BS_to_UPF_assignment[ue_bs_id_change]] -= 1
-            count_BSs_per_UPF[upf_node_id_change] += 1
-
-            BS_to_UPF_assignment[ue_bs_id_change] = upf_node_id_change
-            BSs_with_UPF_ids.add(upf_node_id_change)
-            BSs_with_UPF_ids -= BSs_with_UPF_removed
-            latencies_list[ue_bs_id_change] = new_distance
-
-            assert(f2_num_upfs_new == len(BSs_with_UPF_ids))
-
-            f1_latency = f1_latency_new
-            f2_num_upfs = f2_num_upfs_new
-            f3_deployment_overhead = f3_deployment_overhead_new
-            f4_cp_reassignment_overhead_keep = f4_cp_reassignment_overhead_relocate
-            f_objective_keep = f_objective_relocate
+                if (bs2.get_id() not in BS_to_UPF_assignment or upf_node_previous not in BS_to_UPF_assignment[bs2.get_id()]) or f_objective_relocate < f_objective_keep:
+                    new_latency = G_shortest_path_lengths[bs2][best_bs]
+                    latencies_agg_dict[bs2.get_id()][upf_node_previous] = new_latency
+                    # Update the assignment of all the UEs in bs2
+                    if bs2.get_id() not in BS_to_UPF_assignment:
+                        BS_to_UPF_assignment[bs2.get_id()] = {}
+                    BS_to_UPF_assignment[bs2.get_id()][upf_node_previous] = upf_node
 
     # Convert back to original format BS_to_UPF_assignment -> UE_to_UPF_assignment
-    UE_to_UPF_assignment = convert_bs_assignment_to_ue_assignment(
-        BSs, BS_to_UPF_assignment)
+    UE_to_UPF_assignment = {}
+    for bs2_id in BS_to_UPF_assignment:
+        for upf_node_previous in BS_to_UPF_assignment[bs2_id]:
+            for ue_id in ues_agg_dict[bs2_id][upf_node_previous]:
+                UE_to_UPF_assignment[ue_id] = BS_to_UPF_assignment[bs2_id][upf_node_previous]
 
     return UE_to_UPF_assignment, BSs_with_UPF_ids
 
-
-def old_UPF_assignment_simulated_annealing_previous(G: nx.Graph, BSs, num_UPFs, UE_to_UPF_assignment_previous, BSs_with_UPF_ids_previous, G_shortest_path_lengths, highest_bs_id, iteration_duration, time_deployment, time_removal, cost_relocation, alpha1, alpha2, alpha3, alpha4, num_UEs, max_num_hops):
-    UE_to_UPF_assignment = copy.deepcopy(UE_to_UPF_assignment_previous)
-    BSs_with_UPF_ids = copy.deepcopy(BSs_with_UPF_ids_previous)
-
-    #print("\nRunning simulated annealing", file=stderr)
-
-    # If there was not UPFs in the previous interval, assign them using the greedy_overhead algorithm
-    if (BSs_with_UPF_ids == None or len(BSs_with_UPF_ids) == 0):
-        print("\nRunning old simulated annealing previous", file=stderr)
-    UE_to_UPF_assignment, BSs_with_UPF_ids = UPF_assignment_greedy_overhead(G, BSs, num_UPFs, UE_to_UPF_assignment_previous, BSs_with_UPF_ids_previous, G_shortest_path_lengths,
-                                                                            highest_bs_id, iteration_duration, time_deployment, time_removal, cost_relocation, alpha1, alpha2, alpha3, alpha4, num_UEs, max_num_hops)
-
-    # Assign users which where not present in the previous interval to the closest active BS
-
-    bs: BS
-    for bs in G.nodes():
-        _, upf_node = get_minimum_hops_from_BS_to_any_UPF(
-            G, BSs, bs, BSs_with_UPF_ids, G_shortest_path_lengths)
-        ue: UE
-        for ue in bs.get_UEs():
-            if ue.get_id() not in UE_to_UPF_assignment:
-                UE_to_UPF_assignment[ue.get_id()] = upf_node.get_id()
-
-    # TODO: Use a different data structure rather than UE_to_UPF_assignment aggregating UEs in each BS (e.g., BS_to_UPF_assignment) for speeding up the process
-
-    latencies_list = [
-        G.number_of_nodes() + 1 for _ in range(highest_bs_id + 1)]
-    num_ues_list = [0 for _ in range(highest_bs_id + 1)]
-    tot_ues = 0
-    for bs in G.nodes:
-        num_ues_list[bs.get_id()] = bs.get_numUEs()
-        tot_ues += bs.get_numUEs()
-
-    # f1: Vehicle latency (90-th percentile)
-    UE_hops_list = get_UE_hops_list_assignment(
-        G, BSs, BSs_with_UPF_ids, UE_to_UPF_assignment, G_shortest_path_lengths)
-    f1_num_hops_90th = np_percentile(UE_hops_list, 90)
-    # TODO: Try average instead of percentile for speed-up!
-
-    # f2: Resource usage
-    f2_num_UPFs = len(BSs_with_UPF_ids)
-
-    # f3: Deployment overhead
-    f3_deployment_overhead = get_deployment_overhead(
-        BSs_with_UPF_ids_previous, BSs_with_UPF_ids, time_deployment, time_removal, iteration_duration)
-
-    # f4: Control-plane reassignment overhead
-    f4_control_plane_reassignment_overhead = get_control_plane_reassignment_overhead(
-        BSs, UE_to_UPF_assignment_previous, UE_to_UPF_assignment, cost_relocation, G_shortest_path_lengths)
-
-    # f: Objective function
-    previous_f_objective_function = get_objective_function(G, f1_num_hops_90th, f2_num_UPFs, f3_deployment_overhead, f4_control_plane_reassignment_overhead,
-                                                           alpha1, alpha2, alpha3, alpha4, time_deployment, time_removal, cost_relocation, num_UEs, max_num_hops)
-
-    active_BSs = []
-    bs: BS
-    for bs in G.nodes():
-        if bs.get_numUEs() > 0:
-            active_BSs.append(bs.get_id())
-
-    number_of_iterations = 10
-    for iteration in range(number_of_iterations):
-        BSs_with_UPF_ids_tmp = copy.deepcopy(BSs_with_UPF_ids)
-        UE_to_UPF_assignment_tmp = copy.deepcopy(UE_to_UPF_assignment)
-        latencies_list_tmp = copy.deepcopy(latencies_list)
-
-        # Generate new candidate solution by mutating current solution
-        # Pick random active BS
-        # Assign all the UEs in the BS to a random BS
-        ue_bs_id_change = active_BSs[randint(0, len(active_BSs) - 1)]
-        upf_node_id_change = randint(0, G.number_of_nodes() - 1)
-
-        for ue in BSs[ue_bs_id_change].get_UEs():
-            UE_to_UPF_assignment_tmp[ue.get_id()] = upf_node_id_change
-
-        # Recalculate set of active BSs
-        BSs_with_UPF_ids_tmp = set(UE_to_UPF_assignment_tmp.values())
-
-        # f1: Vehicle latency (90-th percentile)
-
-        UE_hops_list = get_UE_hops_list_assignment(
-            G, BSs, BSs_with_UPF_ids, UE_to_UPF_assignment_tmp, G_shortest_path_lengths)
-        f1_num_hops_90th = np_percentile(UE_hops_list, 90)
-        # TODO: Try average instead of percentile for speed-up!
-
-        # f2: Resource usage
-        f2_num_UPFs = len(BSs_with_UPF_ids_tmp)
-
-        # f3: Deployment overhead
-        f3_deployment_overhead = get_deployment_overhead(
-            BSs_with_UPF_ids_previous, BSs_with_UPF_ids_tmp, time_deployment, time_removal, iteration_duration)
-
-        # f4: Control-plane reassignment overhead
-        f4_control_plane_reassignment_overhead = get_control_plane_reassignment_overhead(
-            BSs, UE_to_UPF_assignment_previous, UE_to_UPF_assignment_tmp, cost_relocation, G_shortest_path_lengths)
-
-        # f: Objective function
-        f_objective_function = get_objective_function(G, f1_num_hops_90th, f2_num_UPFs, f3_deployment_overhead, f4_control_plane_reassignment_overhead,
-                                                      alpha1, alpha2, alpha3, alpha4, time_deployment, time_removal, cost_relocation, num_UEs, max_num_hops)
-
-        if f_objective_function <= previous_f_objective_function:
-            # Accept new candidate if it decreases the objective function
-            UE_to_UPF_assignment = copy.deepcopy(UE_to_UPF_assignment_tmp)
-            BSs_with_UPF_ids = copy.deepcopy(BSs_with_UPF_ids_tmp)
-            latencies_list = copy.deepcopy(latencies_list_tmp)
-            f_objective_function = previous_f_objective_function
-
-    return UE_to_UPF_assignment, BSs_with_UPF_ids
-
-
-def UPF_assignment_greedy_overhead_per_bs(G: nx.Graph, BSs, num_UPFs, UE_to_UPF_assignment_previous, BSs_with_UPF_ids_previous, G_shortest_path_lengths, highest_bs_id, iteration_duration, time_deployment, time_removal, cost_relocation, alpha1, alpha2, alpha3, alpha4, num_UEs, max_num_hops):
-    #UE_to_UPF_assignment = {}
-    BS_to_UPF_assignment_previous = convert_ue_assignment_to_bs_assignment(
-        BSs, UE_to_UPF_assignment_previous)
-
+def UPF_assignment_prediction_greedy_overhead(G: nx.Graph, BSs, num_UPFs, UE_to_UPF_assignment_previous, BSs_with_UPF_ids_previous, G_shortest_path_lengths, highest_bs_id, iteration_duration, time_deployment, time_removal, cost_relocation, alpha1, alpha2, alpha3, num_UEs, max_num_hops):
     BS_to_UPF_assignment = {}
     BSs_with_UPF_ids = set()
 
     bs: BS
 
-    latencies_list = [
-        G.number_of_nodes() + 1 for _ in range(highest_bs_id + 1)]
-    num_ues_list = [0 for _ in range(highest_bs_id + 1)]
+    latencies_agg_dict = {}
+    ues_agg_dict = {}
     tot_ues = 0
     for bs in G.nodes:
-        num_ues_list[bs.get_id()] = bs.get_numUEs()
-        tot_ues += bs.get_numUEs()
+        tot_ues += bs.get_pred_numUEs()
+
+        ue: UE
+        for ue in bs.get_pred_UEs():
+            upf_node_previous = -1
+            if ue.get_id() in UE_to_UPF_assignment_previous:
+                upf_node_previous = UE_to_UPF_assignment_previous[ue.get_id()]
+            if bs.get_id() not in latencies_agg_dict:
+                latencies_agg_dict[bs.get_id()] = {}
+            if upf_node_previous not in latencies_agg_dict[bs.get_id()]:
+                latencies_agg_dict[bs.get_id(
+                )][upf_node_previous] = max_num_hops + 1
+            if bs.get_id() not in ues_agg_dict:
+                ues_agg_dict[bs.get_id()] = {}
+            if upf_node_previous not in ues_agg_dict[bs.get_id()]:
+                ues_agg_dict[bs.get_id()][upf_node_previous] = []
+
+            ues_agg_dict[bs.get_id()][upf_node_previous].append(ue.get_id())
 
     done_BSs = [False for _ in range(highest_bs_id + 1)]
 
     for _ in range(num_UPFs):
         best_bs = None
         best_f_objective_function = None
-        best_BSs_with_UPF_ids = None
-        #best_UE_to_UPF_assignment = None
-        best_BS_to_UPF_assignment = None
-        best_latencies_list = None
         for bs in G.nodes:
             if not done_BSs[bs.get_id()]:
                 # Check objective function if bs is selected
-                BSs_with_UPF_ids_tmp = copy.deepcopy(BSs_with_UPF_ids)
-                #UE_to_UPF_assignment_tmp = copy.deepcopy(UE_to_UPF_assignment)
-                BS_to_UPF_assignment_tmp = copy.deepcopy(BS_to_UPF_assignment)
-                latencies_list_tmp = copy.deepcopy(latencies_list)
 
-                BSs_with_UPF_ids_tmp.add(bs.get_id())
+                # f2: Deployment overhead
+                f2_deployment_overhead = get_deployment_overhead(
+                    BSs_with_UPF_ids_previous, BSs_with_UPF_ids | set([bs.get_id()]), time_deployment, time_removal, iteration_duration)
 
-                # f1: Vehicle latency (90-th percentile)
-                acc_latency = 0
+                # f1 + f2: Vehicle latency (90-th percentile) and control-plane reassignment overhead
+                f_objective_function = get_objective_function(
+                    G, 0, f2_deployment_overhead, 0, alpha1, alpha2, alpha3, time_deployment, time_removal, cost_relocation, num_UEs, max_num_hops)
                 for bs2 in G.nodes:
-                    if bs2.get_numUEs() == 0:
+                    if bs2.get_pred_numUEs() == 0:
                         continue
-                    new_latency = latencies_list_tmp[bs2.get_id()]
+                    #new_latency = latencies_list[bs2.get_id()]
 
-                    # new_latency = min(
-                    #     G_shortest_path_lengths[bs2][bs], latencies_list[bs2.get_id()])
+                    for upf_node_previous in ues_agg_dict[bs2.get_id()]:
+                        num_UEs_agg = len(
+                            ues_agg_dict[bs2.get_id()][upf_node_previous])
+                        latency_agg = latencies_agg_dict[bs2.get_id(
+                        )][upf_node_previous]
+                        f3_control_plane_reassignment_overhead = 0
+                        if (upf_node_previous != -1 and bs2.get_id() in BS_to_UPF_assignment and upf_node_previous in BS_to_UPF_assignment[bs2.get_id()]):
+                            f3_control_plane_reassignment_overhead = num_UEs_agg * \
+                                G_shortest_path_lengths[BSs[upf_node_previous]][BSs[BS_to_UPF_assignment[bs2.get_id(
+                                )][upf_node_previous]]] * cost_relocation
 
-                    f_objective_keep = get_objective_function(G, latencies_list_tmp[bs2.get_id(
-                    )], 0, 0, 0, alpha1, alpha2, alpha3, alpha4, time_deployment, time_removal, cost_relocation, num_UEs, max_num_hops)
-                    f_objective_relocate = get_objective_function(G, G_shortest_path_lengths[bs2][bs], 0, 0, G_shortest_path_lengths[bs2][
-                                                                  bs] * cost_relocation, alpha1, alpha2, alpha3, alpha4, time_deployment, time_removal, cost_relocation, num_UEs, max_num_hops)
+                        f_objective_keep = get_objective_function(G, num_UEs_agg * latency_agg / tot_ues, 0, f3_control_plane_reassignment_overhead,
+                                                                  alpha1, alpha2, alpha3, time_deployment, time_removal, cost_relocation, num_UEs, max_num_hops)
 
-                    # if G_shortest_path_lengths[bs2][bs] < latencies_list[bs2.get_id()]:
-                    if f_objective_relocate < f_objective_keep:
-                        # TODO: Update criteria (f_objective_function instead of latency)
-                        new_latency = G_shortest_path_lengths[bs2][bs]
-                        latencies_list_tmp[bs2.get_id()] = new_latency
-                        # Update the assignment of all the UEs in bs2
-                        BS_to_UPF_assignment_tmp[bs2.get_id()] = bs.get_id()
-                        # for ue in bs2.get_UEs():
-                        #     UE_to_UPF_assignment_tmp[ue.get_id()] = bs.get_id()
+                        f3_control_plane_reassignment_overhead = 0
+                        if (upf_node_previous != -1):
+                            f3_control_plane_reassignment_overhead = num_UEs_agg * \
+                                G_shortest_path_lengths[BSs[upf_node_previous]
+                                                        ][bs] * cost_relocation
 
-                    acc_latency += (new_latency * num_ues_list[bs2.get_id()])
+                        f_objective_relocate = get_objective_function(
+                            G, num_UEs_agg * G_shortest_path_lengths[bs2][bs] / tot_ues, 0, f3_control_plane_reassignment_overhead, alpha1, alpha2, alpha3, time_deployment, time_removal, cost_relocation, num_UEs, max_num_hops)
 
-                # f2: Resource usage
-                f2_num_UPFs = len(BSs_with_UPF_ids_tmp)
-
-                # f3: Deployment overhead
-                f3_deployment_overhead = get_deployment_overhead(
-                    BSs_with_UPF_ids_previous, BSs_with_UPF_ids_tmp, time_deployment, time_removal, iteration_duration)
-
-                # f4: Control-plane reassignment overhead
-                # f4_control_plane_reassignment_overhead = get_control_plane_reassignment_overhead(
-                #     BSs, UE_to_UPF_assignment_previous, UE_to_UPF_assignment_tmp, cost_relocation, G_shortest_path_lengths)
-
-                f4_control_plane_reassignment_overhead = get_control_plane_reassignment_overhead_bs(
-                    BSs, BS_to_UPF_assignment_previous, BS_to_UPF_assignment_tmp, cost_relocation, G_shortest_path_lengths)
-
-                # Calculate average latency
-                f1_num_hops_average = acc_latency / tot_ues
-
-                # f: Objective function
-                f_objective_function = get_objective_function(G, f1_num_hops_average, f2_num_UPFs, f3_deployment_overhead, f4_control_plane_reassignment_overhead,
-                                                              alpha1, alpha2, alpha3, alpha4, time_deployment, time_removal, cost_relocation, num_UEs, max_num_hops)
+                        if f_objective_relocate < f_objective_keep:
+                            f_objective_function += f_objective_relocate
+                        else:
+                            f_objective_function += f_objective_keep
 
                 if best_bs == None or f_objective_function < best_f_objective_function:
                     best_bs = bs
                     best_f_objective_function = f_objective_function
-                    best_BSs_with_UPF_ids = copy.deepcopy(BSs_with_UPF_ids_tmp)
-                    best_BS_to_UPF_assignment = copy.deepcopy(
-                        BS_to_UPF_assignment_tmp)
-                    best_latencies_list = copy.deepcopy(latencies_list_tmp)
-
-        # NOTE: Experimental
-        # if previous_f_objective_function != None and best_f_objective_function > previous_f_objective_function:
-        #     # Do not add more UPFs if the best objective function increases
-        #     break
 
         previous_f_objective_function = best_f_objective_function
 
         upf_node = best_bs.get_id()
         done_BSs[upf_node] = True
-        # BSs_with_UPF_ids.add(upf_node)
-        # for ue in bs.get_UEs():
-        #    UE_to_UPF_assignment[ue.get_id()] = upf_node
+        BSs_with_UPF_ids.add(upf_node)
 
-        BSs_with_UPF_ids = copy.deepcopy(best_BSs_with_UPF_ids)
-        BS_to_UPF_assignment = copy.deepcopy(best_BS_to_UPF_assignment)
-        latencies_list = copy.deepcopy(best_latencies_list)
+        for bs2 in G.nodes:
+            if bs2.get_pred_numUEs() == 0:
+                continue
 
-        # for bs2 in G.nodes:
-        #     new_latency = G_shortest_path_lengths[bs2][best_bs]
-        #     if new_latency < latencies_list[bs2.get_id()]:
-        #         latencies_list[bs2.get_id()] = new_latency
+            for upf_node_previous in ues_agg_dict[bs2.get_id()]:
+                num_UEs_agg = len(
+                    ues_agg_dict[bs2.get_id()][upf_node_previous])
+                latency_agg = latencies_agg_dict[bs2.get_id(
+                )][upf_node_previous]
+                f3_control_plane_reassignment_overhead = 0
+                if (upf_node_previous != -1 and bs2.get_id() in BS_to_UPF_assignment and upf_node_previous in BS_to_UPF_assignment[bs2.get_id()]):
+                    f3_control_plane_reassignment_overhead = num_UEs_agg * \
+                        G_shortest_path_lengths[BSs[upf_node_previous]][BSs[BS_to_UPF_assignment[bs2.get_id(
+                        )][upf_node_previous]]] * cost_relocation
+
+                f_objective_keep = get_objective_function(G, num_UEs_agg * latency_agg / tot_ues, 0, f3_control_plane_reassignment_overhead,
+                                                            alpha1, alpha2, alpha3, time_deployment, time_removal, cost_relocation, num_UEs, max_num_hops)
+
+                f3_control_plane_reassignment_overhead = 0
+                if (upf_node_previous != -1):
+                    f3_control_plane_reassignment_overhead = num_UEs_agg * \
+                        G_shortest_path_lengths[BSs[upf_node_previous]
+                                                ][best_bs] * cost_relocation
+
+                f_objective_relocate = get_objective_function(
+                    G, num_UEs_agg * G_shortest_path_lengths[bs2][best_bs] / tot_ues, 0, f3_control_plane_reassignment_overhead, alpha1, alpha2, alpha3, time_deployment, time_removal, cost_relocation, num_UEs, max_num_hops)
+
+                if (bs2.get_id() not in BS_to_UPF_assignment or upf_node_previous not in BS_to_UPF_assignment[bs2.get_id()]) or f_objective_relocate < f_objective_keep:
+                    new_latency = G_shortest_path_lengths[bs2][best_bs]
+                    latencies_agg_dict[bs2.get_id()][upf_node_previous] = new_latency
+                    # Update the assignment of all the UEs in bs2
+                    if bs2.get_id() not in BS_to_UPF_assignment:
+                        BS_to_UPF_assignment[bs2.get_id()] = {}
+                    BS_to_UPF_assignment[bs2.get_id()][upf_node_previous] = upf_node
 
     # Convert back to original format BS_to_UPF_assignment -> UE_to_UPF_assignment
-    UE_to_UPF_assignment = convert_bs_assignment_to_ue_assignment(
-        BSs, BS_to_UPF_assignment)
 
-    return UE_to_UPF_assignment, BSs_with_UPF_ids
-
-
-def UPF_assignment_greedy_overhead_old_per_ue(G: nx.Graph, BSs, num_UPFs, UE_to_UPF_assignment_previous, BSs_with_UPF_ids_previous, G_shortest_path_lengths, highest_bs_id, iteration_duration, time_deployment, time_removal, cost_relocation, alpha1, alpha2, alpha3, alpha4, num_UEs, max_num_hops):
     UE_to_UPF_assignment = {}
-    BSs_with_UPF_ids = set()
-
-    bs: BS
-
-    latencies_list = [
-        G.number_of_nodes() + 1 for _ in range(highest_bs_id + 1)]
-    num_ues_list = [0 for _ in range(highest_bs_id + 1)]
-    tot_ues = 0
-    for bs in G.nodes:
-        num_ues_list[bs.get_id()] = bs.get_numUEs()
-        tot_ues += bs.get_numUEs()
-
-    done_BSs = [False for _ in range(highest_bs_id + 1)]
-
-    previous_f_objective_function = None
-
-    for _ in range(num_UPFs):
-        best_bs = None
-        best_f_objective_function = None
-        best_BSs_with_UPF_ids = None
-        best_UE_to_UPF_assignment = None
-        best_latencies_list = None
-        for bs in G.nodes:
-            if not done_BSs[bs.get_id()]:
-                # Check objective function if bs is selected
-                BSs_with_UPF_ids_tmp = copy.deepcopy(BSs_with_UPF_ids)
-                UE_to_UPF_assignment_tmp = copy.deepcopy(UE_to_UPF_assignment)
-                latencies_list_tmp = copy.deepcopy(latencies_list)
-
-                BSs_with_UPF_ids_tmp.add(bs.get_id())
-
-                # f1: Vehicle latency (90-th percentile)
-                acc_latency = 0
-                for bs2 in G.nodes:
-                    new_latency = latencies_list_tmp[bs2.get_id()]
-
-                    # new_latency = min(
-                    #     G_shortest_path_lengths[bs2][bs], latencies_list[bs2.get_id()])
-
-                    f_objective_keep = get_objective_function(G, latencies_list_tmp[bs2.get_id(
-                    )], 0, 0, 0, alpha1, alpha2, alpha3, alpha4, time_deployment, time_removal, cost_relocation, num_UEs, max_num_hops)
-                    f_objective_relocate = get_objective_function(G, G_shortest_path_lengths[bs2][bs], 0, 0, G_shortest_path_lengths[bs2][
-                                                                  bs] * cost_relocation, alpha1, alpha2, alpha3, alpha4, time_deployment, time_removal, cost_relocation, num_UEs, max_num_hops)
-
-                    # if G_shortest_path_lengths[bs2][bs] < latencies_list[bs2.get_id()]:
-                    if f_objective_relocate < f_objective_keep:
-                        # TODO: Update criteria (f_objective_function instead of latency)
-                        new_latency = G_shortest_path_lengths[bs2][bs]
-                        latencies_list_tmp[bs2.get_id()] = new_latency
-                        # Update the assignment of all the UEs in bs2
-                        for ue in bs2.get_UEs():
-                            UE_to_UPF_assignment_tmp[ue.get_id()] = bs.get_id()
-
-                    acc_latency += (new_latency * num_ues_list[bs2.get_id()])
-
-                # f2: Resource usage
-                f2_num_UPFs = len(BSs_with_UPF_ids_tmp)
-
-                # f3: Deployment overhead
-                f3_deployment_overhead = get_deployment_overhead(
-                    BSs_with_UPF_ids_previous, BSs_with_UPF_ids_tmp, time_deployment, time_removal, iteration_duration)
-
-                # f4: Control-plane reassignment overhead
-                f4_control_plane_reassignment_overhead = get_control_plane_reassignment_overhead(
-                    BSs, UE_to_UPF_assignment_previous, UE_to_UPF_assignment_tmp, cost_relocation, G_shortest_path_lengths)
-
-                # Calculate average latency
-                f1_num_hops_average = acc_latency / tot_ues
-
-                # f: Objective function
-                f_objective_function = get_objective_function(G, f1_num_hops_average, f2_num_UPFs, f3_deployment_overhead, f4_control_plane_reassignment_overhead,
-                                                              alpha1, alpha2, alpha3, alpha4, time_deployment, time_removal, cost_relocation, num_UEs, max_num_hops)
-
-                if best_bs == None or f_objective_function < best_f_objective_function:
-                    best_bs = bs
-                    best_f_objective_function = f_objective_function
-                    best_BSs_with_UPF_ids = copy.deepcopy(BSs_with_UPF_ids_tmp)
-                    best_UE_to_UPF_assignment = copy.deepcopy(
-                        UE_to_UPF_assignment_tmp)
-                    best_latencies_list = copy.deepcopy(latencies_list_tmp)
-
-        # NOTE: Experimental
-        # if previous_f_objective_function != None and best_f_objective_function > previous_f_objective_function:
-        #     # Do not add more UPFs if the best objective function increases
-        #     break
-
-        previous_f_objective_function = best_f_objective_function
-
-        upf_node = best_bs.get_id()
-        done_BSs[upf_node] = True
-        # BSs_with_UPF_ids.add(upf_node)
-        # for ue in bs.get_UEs():
-        #    UE_to_UPF_assignment[ue.get_id()] = upf_node
-
-        BSs_with_UPF_ids = copy.deepcopy(best_BSs_with_UPF_ids)
-        UE_to_UPF_assignment = copy.deepcopy(best_UE_to_UPF_assignment)
-        latencies_list = copy.deepcopy(best_latencies_list)
-
-        # for bs2 in G.nodes:
-        #     new_latency = G_shortest_path_lengths[bs2][best_bs]
-        #     if new_latency < latencies_list[bs2.get_id()]:
-        #         latencies_list[bs2.get_id()] = new_latency
+    for bs2_id in BS_to_UPF_assignment:
+        for upf_node_previous in BS_to_UPF_assignment[bs2_id]:
+            for ue_id in ues_agg_dict[bs2_id][upf_node_previous]:
+                UE_to_UPF_assignment[ue_id] = BS_to_UPF_assignment[bs2_id][upf_node_previous]
 
     return UE_to_UPF_assignment, BSs_with_UPF_ids
+
 
 # Legacy assignment methods (i.e., they do not consider deployment and reassignment overheads)
-
-
 def UPF_assignment_old(algorithm, G: nx.Graph, BSs, num_UPFs, UE_to_UPF_assignment_previous, BSs_with_UPF_ids_previous, G_shortest_path_lengths, highest_bs_id):
     UE_to_UPF_assignment = {}
     BSs_with_UPF_ids = globals()["UPF_allocation_{}".format(algorithm[4:])](
@@ -1330,13 +1104,13 @@ def UPF_assignment_old(algorithm, G: nx.Graph, BSs, num_UPFs, UE_to_UPF_assignme
 
 
 # def UPF_assignment(algorithm, G, num_UPFs, UE_to_UPF_assignment_previous, BSs_with_UPF_ids_previous, G_shortest_path_lengths, highest_bs_id):
-def UPF_assignment(algorithm, G: nx.Graph, BSs, num_UPFs, UE_to_UPF_assignment_previous, BSs_with_UPF_ids_previous, G_shortest_path_lengths, highest_bs_id, iteration_duration, time_deployment, time_removal, cost_relocation, alpha1, alpha2, alpha3, alpha4, num_UEs, max_num_hops):
+def UPF_assignment(algorithm, G: nx.Graph, BSs, num_UPFs, UE_to_UPF_assignment_previous, BSs_with_UPF_ids_previous, G_shortest_path_lengths, highest_bs_id, iteration_duration, time_deployment, time_removal, cost_relocation, alpha1, alpha2, alpha3, num_UEs, max_num_hops):
     if "old_" in algorithm:
         UE_to_UPF_assignment, BSs_with_UPF_ids = UPF_assignment_old(algorithm, G, BSs, num_UPFs, UE_to_UPF_assignment_previous,
                                                                     BSs_with_UPF_ids_previous, G_shortest_path_lengths, highest_bs_id)
     else:
         UE_to_UPF_assignment, BSs_with_UPF_ids = globals()["UPF_assignment_{}".format(
-            algorithm)](G, BSs, num_UPFs, UE_to_UPF_assignment_previous, BSs_with_UPF_ids_previous, G_shortest_path_lengths, highest_bs_id, iteration_duration, time_deployment, time_removal, cost_relocation, alpha1, alpha2, alpha3, alpha4, num_UEs, max_num_hops)
+            algorithm)](G, BSs, num_UPFs, UE_to_UPF_assignment_previous, BSs_with_UPF_ids_previous, G_shortest_path_lengths, highest_bs_id, iteration_duration, time_deployment, time_removal, cost_relocation, alpha1, alpha2, alpha3, num_UEs, max_num_hops)
 
     if DEBUG:
         print(UE_to_UPF_assignment)
@@ -1347,7 +1121,6 @@ def UPF_assignment(algorithm, G: nx.Graph, BSs, num_UPFs, UE_to_UPF_assignment_p
 
 # Metrics
 def get_minimum_hops_from_BS_to_UPF(G, bs, upf_assigned, G_shortest_path_lengths):
-    # hops = max(G_shortest_path_lengths[bs][other_bs] - 1, 0) #TODO: SHOULD WE INCLUDE THE -1 OR NOT?
     hops = max(G_shortest_path_lengths[bs][upf_assigned], 0)
     return hops
 
@@ -1361,7 +1134,6 @@ def get_minimum_hops_from_BS_to_any_UPF(G, BSs, bs, BSs_with_UPF_ids, G_shortest
             # h = len(nx.shortest_path(G, source=bs,
             #                          target=other_bs)) - 1  # Dijkstra
             # Pre-computed Floyd-Wharsall
-            # h = G_shortest_path_lengths[bs][other_bs] - 1 #TODO: SHOULD WE INCLUDE THE -1 OR NOT? -> NOT
             h = G_shortest_path_lengths[bs][other_bs]
         except:
             continue
@@ -1444,7 +1216,6 @@ def check_assignment_ok(BSs, UE_to_UPF_assignment, BSs_with_UPF_ids):
                 return False
     return True
 
-
 def get_control_plane_reassignment_overhead(BSs, UE_to_UPF_assignment_previous, UE_to_UPF_assignment, cost_relocation, G_shortest_path_lengths):
     control_plane_reassignment_overhead = 0
     for ue in UE_to_UPF_assignment:
@@ -1455,6 +1226,7 @@ def get_control_plane_reassignment_overhead(BSs, UE_to_UPF_assignment_previous, 
         if upf_old != upf_new and upf_old != None:
             control_plane_reassignment_overhead += cost_relocation * \
                 G_shortest_path_lengths[BSs[upf_old]][BSs[upf_new]]
+            #print("Changing UE {} from {} to {}".format(ue, upf_old, upf_new))
 
     return control_plane_reassignment_overhead
 
@@ -1474,27 +1246,38 @@ def get_control_plane_reassignment_overhead_bs(BSs, BS_to_UPF_assignment_previou
     return control_plane_reassignment_overhead
 
 
-def get_objective_function(G: nx.Graph, f1_num_hops, f2_num_UPFs, f3_deployment_overhead, f4_control_plane_reassignment_overhead,
-                           alpha1, alpha2, alpha3, alpha4, time_deployment, time_removal, cost_relocation, num_UEs, max_num_hops):
+def get_objective_function(G: nx.Graph, f1_num_hops, f2_deployment_overhead, f3_control_plane_reassignment_overhead,
+                           alpha1, alpha2, alpha3, time_deployment, time_removal, cost_relocation, num_UEs, max_num_hops):
+    return alpha1 * get_f1_normalized(f1_num_hops, max_num_hops) + \
+        alpha2 * get_f2_normalized(G, f2_deployment_overhead, time_deployment, time_removal) + \
+        alpha3 * get_f3_normalized(f3_control_plane_reassignment_overhead,
+                                   cost_relocation, num_UEs, max_num_hops)
+
+
+def get_f1_normalized(f1_num_hops, max_num_hops):
+    return f1_num_hops / max_num_hops
+
+
+def get_f2_normalized(G: nx.Graph, f2_deployment_overhead, time_deployment, time_removal):
     max_num_UPFs = G.number_of_nodes()
     max_deployment_overhead = max_num_UPFs * max(time_deployment, time_removal)
+    return f2_deployment_overhead / max_deployment_overhead
+
+
+def get_f3_normalized(f3_control_plane_reassignment_overhead, cost_relocation, num_UEs, max_num_hops):
+    # EXPERIMENTAL
     max_control_plane_reassignment_overhead = (
         1 + num_UEs) * max_num_hops * cost_relocation
-    return alpha1 * f1_num_hops / max_num_hops + \
-        alpha2 * f2_num_UPFs / max_num_UPFs + \
-        alpha3 * f3_deployment_overhead / max_deployment_overhead + \
-        alpha4 * f4_control_plane_reassignment_overhead / \
-        max_control_plane_reassignment_overhead
+    return f3_control_plane_reassignment_overhead / max_control_plane_reassignment_overhead
+
 
 # Auxiliar functions for converting formats
-
-
 def convert_bs_assignment_to_ue_assignment(BSs, BS_to_UPF_assignment):
     UE_to_UPF_assignment = {}
     for bs_id in BS_to_UPF_assignment:
-        bs = BSs[bs_id]
-        for ue in bs.get_UEs():
-            UE_to_UPF_assignment[ue.get_id()] = BS_to_UPF_assignment[bs_id]
+        for upf_node in BS_to_UPF_assignment[bs_id]:
+            for ue_id in BS_to_UPF_assignment[bs_id][upf_node]:
+                UE_to_UPF_assignment[ue_id] = upf_node
 
     return UE_to_UPF_assignment
 
@@ -1504,17 +1287,18 @@ def convert_ue_assignment_to_bs_assignment(BSs, UE_to_UPF_assignment):
     for bs_id in BSs:
         bs = BSs[bs_id]
         for ue in bs.get_UEs():
-            # Assumes all UEs are assigned to the same UPF
             if ue.get_id() in UE_to_UPF_assignment:
-                BS_to_UPF_assignment[bs_id] = UE_to_UPF_assignment[ue.get_id()]
-            break
+                upf_node = UE_to_UPF_assignment[ue.get_id()]
+                if bs_id not in BS_to_UPF_assignment:
+                    BS_to_UPF_assignment[bs_id] = {}
+                if upf_node not in BS_to_UPF_assignment[bs_id]:
+                    BS_to_UPF_assignment[bs_id][upf_node] = []
+                BS_to_UPF_assignment[bs_id][upf_node].append(ue.get_id())
 
     return BS_to_UPF_assignment
 
 
 # Used for debugging
-
-
 def print_statistics(UE_hops_list, file=stdout):
     if file != None:
         print("Minimum: {}".format(min(UE_hops_list)), file=file)
@@ -1546,7 +1330,7 @@ def main():
     # Parse arguments
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "--algorithm", help="Specifies the UPF allocation algorithm [Supported: old_random/old_greedy_percentile/old_greedy_average/old_kmeans_greedy_average/old_modularity_greedy_average/greedy_overhead].", required=True)
+        "--algorithm", help="Specifies the UPF allocation algorithm [Supported: old_random/old_greedy_percentile/old_greedy_average/old_kmeans_greedy_average/old_modularity_greedy_average/greedy_overhead/prediction_greedy_overhead].", required=True)
     parser.add_argument(
         "--minUPFs", help="Specifies the minimum number of UPFs to be allocated [Default: {}].".format(DEFAULT_MIN_UPF), type=int, default=DEFAULT_MIN_UPF)
     parser.add_argument(
@@ -1569,8 +1353,6 @@ def main():
         "--alpha2", help="Weight for the first parameter of the objective function (latency) [Default: {}].".format(DEFAULT_ALPHA2), type=float, default=DEFAULT_ALPHA2)
     parser.add_argument(
         "--alpha3", help="Weight for the first parameter of the objective function (latency) [Default: {}].".format(DEFAULT_ALPHA3), type=float, default=DEFAULT_ALPHA3)
-    parser.add_argument(
-        "--alpha4", help="Weight for the first parameter of the objective function (latency) [Default: {}].".format(DEFAULT_ALPHA4), type=float, default=DEFAULT_ALPHA4)
     args = parser.parse_args()
     algorithm = args.algorithm
     min_UPFs = args.minUPFs
@@ -1584,7 +1366,6 @@ def main():
     alpha1 = args.alpha1
     alpha2 = args.alpha2
     alpha3 = args.alpha3
-    alpha4 = args.alpha4
 
     # Generate graph
     G, BSs, G_shortest_path_lengths, highest_bs_id, max_num_hops = generate_graph(
@@ -1598,6 +1379,9 @@ def main():
         list_results_deployment_overhead = []
         list_results_control_plane_reassignment_overhead = []
         list_results_objective_function = []
+        list_results_f1_normalized = []
+        list_results_f2_normalized = []
+        list_results_f3_normalized = []
 
         global cluster_BSs_list
         if "kmeans" in algorithm:
@@ -1617,9 +1401,10 @@ def main():
             kmeans.fit(features)
 
         for _ in range(1):
-            # Clear UEs in BSs
+            # Clear UEs in BSs (and pred_UEs)
             for bs in G.nodes():
                 bs.clear_UEs()
+                bs.clear_pred_UEs()
 
             iteration = 0
             # First UPF allocation is random
@@ -1630,13 +1415,35 @@ def main():
             BSs_with_UPF_ids_previous = set()
 
             UE_to_UPF_assignment, BSs_with_UPF_ids = UPF_assignment("old_random", G, BSs, num_UPFs, None, None, G_shortest_path_lengths,
-                                                                    highest_bs_id, iteration_duration, time_deployment, time_removal, cost_relocation, alpha1, alpha2, alpha3, alpha4, 0, max_num_hops)
+                                                                    highest_bs_id, iteration_duration, time_deployment, time_removal, cost_relocation, alpha1, alpha2, alpha3, 0, max_num_hops)
 
             upf_start_time = time.process_time()  # seconds
             print("Running {} for {} UPFs".format(
                 algorithm, num_UPFs), file=stderr)
             for UEs in read_UE_data(ue_file, BSs, iteration_duration):
                 iteration += 1
+
+                ## Experimental: @pfondo JUST MOVED
+                if algorithm.startswith("prediction_"):
+                    start_time = time.process_time() * 1e3  # milliseconds
+
+                    # Calculate assignment for the next time slot
+
+                    BSs_with_UPF_ids_previous = BSs_with_UPF_ids
+                    UE_to_UPF_assignment_previous = UE_to_UPF_assignment
+
+                    UE_to_UPF_assignment, BSs_with_UPF_ids = UPF_assignment(algorithm, G, BSs, num_UPFs, UE_to_UPF_assignment_previous, BSs_with_UPF_ids_previous,
+                                                                            G_shortest_path_lengths, highest_bs_id, iteration_duration, time_deployment, time_removal, cost_relocation, alpha1, alpha2, alpha3, len(UEs), max_num_hops)
+
+                    assert check_assignment_ok(
+                        BSs, UE_to_UPF_assignment, BSs_with_UPF_ids)
+
+                    # print(UE_to_UPF_assignment)
+
+                    end_time = time.process_time() * 1e3  # milliseconds
+                    elapsed_time = end_time - start_time
+
+                    list_results_elapsed_time.append(elapsed_time)
 
                 # Calculate metrics
                 # f1: Vehicle latency (90-th percentile)
@@ -1648,53 +1455,66 @@ def main():
                 list_results_num_hops.append(f1_num_hops_90th)
                 # print(UE_hops_list, file=stderr)
 
-                # f2: Resource usage
-                f2_num_UPFs = len(BSs_with_UPF_ids)
-                list_results_num_upfs.append(f2_num_UPFs)
+                f1_normalized = get_f1_normalized(
+                    f1_num_hops_90th, max_num_hops)
+                list_results_f1_normalized.append(f1_normalized)
 
-                # f3: Deployment overhead
-                f3_deployment_overhead = get_deployment_overhead(
+                # Resource usage (f2 in previous formulation)
+                actual_num_UPFs = len(BSs_with_UPF_ids)
+                list_results_num_upfs.append(actual_num_UPFs)
+
+                # f2: Deployment overhead
+                f2_deployment_overhead = get_deployment_overhead(
                     BSs_with_UPF_ids_previous, BSs_with_UPF_ids, time_deployment, time_removal, iteration_duration)
 
-                list_results_deployment_overhead.append(f3_deployment_overhead)
+                list_results_deployment_overhead.append(f2_deployment_overhead)
 
-                # f4: Control-plane reassignment overhead
-                f4_control_plane_reassignment_overhead = get_control_plane_reassignment_overhead(
+                f2_normalized = get_f2_normalized(
+                    G, f2_deployment_overhead, time_deployment, time_removal)
+                list_results_f2_normalized.append(f2_normalized)
+
+                # f3: Control-plane reassignment overhead
+                f3_control_plane_reassignment_overhead = get_control_plane_reassignment_overhead(
                     BSs, UE_to_UPF_assignment_previous, UE_to_UPF_assignment, cost_relocation, G_shortest_path_lengths)
                 list_results_control_plane_reassignment_overhead.append(
-                    f4_control_plane_reassignment_overhead)
+                    f3_control_plane_reassignment_overhead)
+
+                f3_normalized = get_f3_normalized(
+                    f3_control_plane_reassignment_overhead, cost_relocation, len(UEs), max_num_hops)
+                list_results_f3_normalized.append(f3_normalized)
 
                 # f: Objective function
-                f_objective_function = get_objective_function(G, f1_num_hops_90th, f2_num_UPFs, f3_deployment_overhead, f4_control_plane_reassignment_overhead,
-                                                              alpha1, alpha2, alpha3, alpha4, time_deployment, time_removal, cost_relocation, len(UEs), max_num_hops)
+                f_objective_function = get_objective_function(G, f1_num_hops_90th, f2_deployment_overhead, f3_control_plane_reassignment_overhead,
+                                                              alpha1, alpha2, alpha3, time_deployment, time_removal, cost_relocation, len(UEs), max_num_hops)
 
                 list_results_objective_function.append(f_objective_function)
+
+                if not algorithm.startswith("prediction_"):
+                    start_time = time.process_time() * 1e3  # milliseconds
+
+                    # Calculate assignment for the next time slot
+
+                    BSs_with_UPF_ids_previous = BSs_with_UPF_ids
+                    UE_to_UPF_assignment_previous = UE_to_UPF_assignment
+
+                    UE_to_UPF_assignment, BSs_with_UPF_ids = UPF_assignment(algorithm, G, BSs, num_UPFs, UE_to_UPF_assignment_previous, BSs_with_UPF_ids_previous,
+                                                                            G_shortest_path_lengths, highest_bs_id, iteration_duration, time_deployment, time_removal, cost_relocation, alpha1, alpha2, alpha3, len(UEs), max_num_hops)
+
+                    assert check_assignment_ok(
+                        BSs, UE_to_UPF_assignment, BSs_with_UPF_ids)
+
+                    # print(UE_to_UPF_assignment)
+
+                    end_time = time.process_time() * 1e3  # milliseconds
+                    elapsed_time = end_time - start_time
+
+                    list_results_elapsed_time.append(elapsed_time)
 
                 if DEBUG:
                     print("UE hops to UPF: {}".format(
                         UE_hops_list), file=stderr)
                     print_statistics(UE_hops_list, file=stderr)
                     print("\n\n", file=stderr)
-
-                start_time = time.process_time() * 1e3  # milliseconds
-
-                # Calculate assignment for the next time slot
-
-                BSs_with_UPF_ids_previous = BSs_with_UPF_ids
-                UE_to_UPF_assignment_previous = UE_to_UPF_assignment
-
-                UE_to_UPF_assignment, BSs_with_UPF_ids = UPF_assignment(algorithm, G, BSs, num_UPFs, UE_to_UPF_assignment_previous, BSs_with_UPF_ids_previous,
-                                                                        G_shortest_path_lengths, highest_bs_id, iteration_duration, time_deployment, time_removal, cost_relocation, alpha1, alpha2, alpha3, alpha4, len(UEs), max_num_hops)
-
-                assert check_assignment_ok(
-                    BSs, UE_to_UPF_assignment, BSs_with_UPF_ids)
-
-                # print(UE_to_UPF_assignment)
-
-                end_time = time.process_time() * 1e3  # milliseconds
-                elapsed_time = end_time - start_time
-
-                list_results_elapsed_time.append(elapsed_time)
 
                 print("\r  Iteration {}: {} UES, {} hops, {:.3f} ms".format(
                     iteration, len(UEs), int(f1_num_hops_90th), elapsed_time), end='', file=stderr)
@@ -1720,6 +1540,12 @@ def main():
             list_results_control_plane_reassignment_overhead, 0.95)
         mci_objective_function = mean_confidence_interval(
             list_results_objective_function, 0.95)
+        mci_f1_normalized = mean_confidence_interval(
+            list_results_f1_normalized, 0.95)
+        mci_f2_normalized = mean_confidence_interval(
+            list_results_f2_normalized, 0.95)
+        mci_f3_normalized = mean_confidence_interval(
+            list_results_f3_normalized, 0.95)
 
         print("  Elapsed time: {:.3f} seconds".format(
             upf_elapsed_time), file=stderr)
@@ -1732,7 +1558,10 @@ def main():
               "{:.3f} {:.3f} {:.3f} "
               "{:.3f} {:.3f} {:.3f} "
               "{:.3f} {:.3f} {:.3f} "
-              "{:.3f} {:.3f} {:.3f}".format(algorithm, num_UPFs, mci_num_hops[0], mci_num_hops[1],
+              "{:.3f} {:.3f} {:.3f} "
+              "{:.6f} {:.6f} {:.6f} "
+              "{:.6f} {:.6f} {:.6f} "
+              "{:.6f} {:.6f} {:.6f}".format(algorithm, num_UPFs, mci_num_hops[0], mci_num_hops[1],
                                             mci_num_hops[2], mci_elapsed_time[0], mci_elapsed_time[1],
                                             mci_elapsed_time[2], mci_num_upfs[0], mci_num_upfs[1],
                                             mci_num_upfs[2], mci_deployment_overhead[0],
@@ -1741,9 +1570,20 @@ def main():
                                             mci_control_plane_reassignment_overhead[1],
                                             mci_control_plane_reassignment_overhead[2],
                                             mci_objective_function[0], mci_objective_function[1],
-                                            mci_objective_function[2]))
+                                            mci_objective_function[2], mci_f1_normalized[0],
+                                            mci_f1_normalized[1], mci_f1_normalized[2],
+                                            mci_f2_normalized[0], mci_f2_normalized[1],
+                                            mci_f2_normalized[2], mci_f3_normalized[0],
+                                            mci_f3_normalized[1], mci_f3_normalized[2]
+                                            ))
+        # print("DEBUG:", file = stderr)
+        # print(list_results_num_hops, file = stderr)
+        # print(list_results_deployment_overhead, file = stderr)
+        # print(list_results_control_plane_reassignment_overhead, file = stderr)
+        # print(list_results_f1_normalized, file = stderr)
+        # print(list_results_f2_normalized, file = stderr)
+        # print(list_results_f3_normalized, file = stderr)
 
 
 if __name__ == "__main__":
     main()
-
