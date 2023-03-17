@@ -19,8 +19,7 @@ The simulator allows the evaluation of algorithms for the dynamic deployment of 
     --minUPFs MINUPFS     Specifies the minimum number of UPFs to be allocated [Default: 1].
     --maxUPFs MAXUPFS     Specifies the maximum number of UPFs to be allocated [Default: 10].
     --bsFile BSFILE       File containing the information about the base stations [Format: each line contains the id, x coordinate and y coordinate of a base station separated by spaces].
-    --ueFile UEFILE       File containing the information about the users throughout the simulation [Format: each line contains the timestamp, user id, x coordinate, y coordinate, speed and, optionally, the base
-                            station id to which the user is attached].
+    --ueFile UEFILE       File containing the information about the users throughout the simulation [Format: each line contains the timestamp, user id, x coordinate, y coordinate, speed and, optionally, base station id to which the user is attached, predicted x coordinate, predicted y coordinate and predicted base station id to which the user is attached].
     --iterationDuration ITERATIONDURATION
                             Duration of each time-slot in seconds [Default: 5].
     --timeDeployment TIMEDEPLOYMENT

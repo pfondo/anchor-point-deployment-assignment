@@ -1338,7 +1338,7 @@ def main():
     parser.add_argument(
         "--bsFile", help="File containing the information about the base stations [Format: each line contains the id, x coordinate and y coordinate of a base station separated by spaces].", required=True)
     parser.add_argument(
-        "--ueFile", help="File containing the information about the users throughout the simulation [Format: each line contains the timestamp, user id, x coordinate, y coordinate, speed and, optionally, the base station id to which the user is attached].", required=True)
+        "--ueFile", help="File containing the information about the users throughout the simulation [Format: each line contains the timestamp, user id, x coordinate, y coordinate, speed and, optionally, base station id to which the user is attached, predicted x coordinate, predicted y coordinate and predicted base station id to which the user is attached].", required=True)
     parser.add_argument(
         "--iterationDuration", help="Duration of each time-slot in seconds [Default: {}].".format(DEFAULT_ITERATION_DURATION), type=int, default=DEFAULT_ITERATION_DURATION)
     parser.add_argument(
