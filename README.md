@@ -5,7 +5,7 @@
 
 Simulator for testing the deployment of anchor point network functions (e.g., User Plane Function (UPF) in 5G) and the assignment of the serving anchor point for each users in dynamic Multi-Access Edge Computing (MEC) scenarios.
 
-The simulator allows the evaluation of algorithms for the dynamic deployment of anchor point network functions and the assignment of the serving anchor point for each user. The simulator calculates the latency between each UE and its serving anchor point, the execution time of the algorithm, the resource usage (number of UPF actually allocated), the deployment overhead, the control-plane reassignment overhead introduced in the network and the objective function as defined in http://www.investigo.biblioteca.uvigo.es/xmlui/handle/11093/3149.
+The simulator allows the evaluation of algorithms for the dynamic deployment of anchor point network functions and the assignment of the serving anchor point for each user. The simulator calculates the latency between each UE and its serving anchor point, the execution time of the algorithm, the resource usage (number of UPF actually allocated), the deployment overhead, the control-plane reassignment overhead introduced in the network and the objective function as defined in https://doi.org/10.1109/TVT.2023.3297017.
 
 ## Execution
 
@@ -48,6 +48,12 @@ An additional algorithm named "algX" can be added to the simulator by implementi
     def UPF_assignment_X(G: nx.Graph, BSs, num_UPFs, UE_to_UPF_assignment_previous, BSs_with_UPF_ids_previous, G_shortest_path_lengths, highest_bs_id, iteration_duration, time_deployment, time_removal, cost_relocation, alpha1, alpha2, alpha3, num_UEs, max_num_hops)
 
 The method must return two elements: The first one must be a dictionary being the key the ID of each UE and value the ID of the assigned MEC location (i.e., base station). The second one must be a set of no more than num_UPFs integers representing the IDs of the MEC location (i.e., base station) where UPFs are going to be deployed in the next interval.
+
+## Citation
+
+If you use this simulator, please cite the following journal article:
+
+https://doi.org/10.1109/TVT.2023.3297017
 
 ## Copyright
 
