@@ -1,5 +1,6 @@
 # anchor-point-deployment-assignment-simulator
 
+[![DOI](https://zenodo.org/badge/466505939.svg)](https://doi.org/10.5281/zenodo.14783602)
 
 ## Description
 
